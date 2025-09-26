@@ -1,0 +1,4 @@
+__pycache__/
+checkpoints/
+splits/
+ISIC_2019/
