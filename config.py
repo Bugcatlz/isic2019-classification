@@ -9,3 +9,4 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # Dataset paths
 csv_file = "ISIC_2019/ISIC_2019_Training_GroundTruth.csv"
 img_dir = "ISIC_2019/ISIC_2019_Training_Input"
+metadata_file = "ISIC_2019/ISIC_2019_Training_Metadata.csv"
