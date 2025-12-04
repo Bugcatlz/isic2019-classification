@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Skin Cancer Explainability Demo</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
@@ -91,11 +92,14 @@
     
     .comparison-slider {
       position: absolute;
-      bottom: 1rem;
-      left: 50%;
-      transform: translateX(-50%);
-      width: 80%;
-      z-index: 10;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      opacity: 0;
+      cursor: col-resize;
+      z-index: 20;
+      margin: 0;
     }
     
     .slider-line {
@@ -105,100 +109,153 @@
       width: 2px;
       background-color: rgb(56, 189, 248);
       pointer-events: none;
-      z-index: 5;
+      z-index: 15;
+      box-shadow: 0 0 10px rgba(0,0,0,0.5);
+    }
+    
+    /* Add a handle to the slider line */
+    .slider-line::after {
+      content: '';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 40px;
+      height: 40px;
+      background-color: rgba(56, 189, 248, 0.3);
+      border: 2px solid rgb(56, 189, 248);
+      border-radius: 50%;
+      backdrop-filter: blur(2px);
+    }
+    
+    /* Add arrows to handle */
+    .slider-line::before {
+      content: '↔';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: white;
+      font-size: 20px;
+      font-weight: bold;
+      z-index: 16;
+      text-shadow: 0 1px 2px rgba(0,0,0,0.5);
     }
 
     /* Print Styles */
     @media print {
       @page {
-        margin: 0;
-        size: A4;
+        size: A4 portrait;
+        margin: 0; /* Remove browser margins (white borders) */
       }
-      
+
       html, body {
-        background-color: #020617 !important; /* slate-950 */
-        color: #f1f5f9 !important; /* slate-100 */
+        width: 210mm;
+        height: 297mm;
+        margin: 0;
+        padding: 0;
+        background-color: #020617 !important;
         -webkit-print-color-adjust: exact !important;
         print-color-adjust: exact !important;
+        overflow: hidden; /* Try to prevent spillover */
       }
 
-      /* Force background printing for all elements */
-      * {
-        -webkit-print-color-adjust: exact !important;
-        print-color-adjust: exact !important;
-      }
-
-      /* Add padding back since we removed page margin */
-      .max-w-7xl {
-        padding: 1cm !important;
-        max-width: 100% !important;
+      /* Main container */
+      .max-w-7xl, .w-full.md\:max-w-7xl {
+        width: 100% !important;
+        max-width: none !important;
+        padding: 10mm !important;
         margin: 0 !important;
+        height: 297mm; /* Full A4 height */
+        box-sizing: border-box;
+        display: flex;
+        flex-direction: column;
       }
 
-      /* Hide elements not needed for report */
-      form, /* Input form */
-      .tab-button, /* Tab navigation */
-      .xai-container, /* Hide entire XAI container */
-      #downloadForm, /* Old download button */
-      #printBtnContainer, /* The print button itself */
-      .lg\:col-span-1 { /* The entire left column */
+      /* Header compaction */
+      header {
+        margin-bottom: 1rem !important;
+        flex-shrink: 0;
+      }
+      header h1 {
+        font-size: 1.8rem !important;
+      }
+      header p {
+        font-size: 0.9rem !important;
+        margin-top: 0.25rem !important;
+      }
+      header .flex {
+        margin-top: 0.5rem !important;
+        font-size: 0.75rem !important;
+      }
+
+      /* Hide elements */
+      form, .tab-button, .xai-container, #downloadForm, #printBtnContainer, .lg\:col-span-1 {
         display: none !important;
       }
 
+      /* Main Content Area */
       .grid {
         display: block !important;
+        flex-grow: 1;
+        overflow: hidden; /* Clip if too long, though we try to fit */
       }
 
       .lg\:col-span-2 {
         width: 100% !important;
       }
 
-      /* Ensure charts fit */
-      canvas {
-        max-width: 100% !important;
-        page-break-inside: avoid;
-      }
-
-      /* Expand all XAI tabs */
+      /* Compact XAI tabs */
       .tab-content {
         display: block !important;
         opacity: 1 !important;
-        margin-bottom: 2rem;
-        break-inside: avoid; /* Prevent cutting inside a section */
+        margin-bottom: 1rem !important;
+        padding: 0.5rem !important;
+        border: 1px solid #334155;
+        background-color: #0f172a !important;
         page-break-inside: avoid;
-        border: 1px solid #334155; /* slate-700 */
-        border-radius: 0.5rem;
-        padding: 1rem;
-        background-color: #0f172a !important; /* slate-900 */
       }
 
-      /* Add titles to tabs since buttons are gone */
       .tab-content::before {
-        content: attr(data-print-title);
-        display: block;
-        font-size: 1.25rem;
-        font-weight: bold;
-        color: #7dd3fc; /* sky-300 */
-        margin-bottom: 1rem;
-        border-bottom: 1px solid #334155;
-        padding-bottom: 0.5rem;
+        font-size: 1rem !important;
+        margin-bottom: 0.5rem !important;
+        padding-bottom: 0.25rem !important;
       }
 
-      /* Ensure charts and images fit */
-      canvas, img {
-        max-width: 100% !important;
-        page-break-inside: avoid;
+      /* Scale down images to fit */
+      .comparison-container {
+        width: 90mm !important;
+        max-width: 90mm !important;
+        margin: 0 auto 0.5rem auto !important;
+      }
+      .comparison-img, .comparison-overlay img {
+        width: 90mm !important;
       }
       
-      /* Reset slider for print (show full LIME/Comparison) */
       .comparison-overlay {
-        clip-path: none !important;
-        width: 50% !important; /* Show half/half or full? Let's show side-by-side if possible, or just overlay. */
-        /* Actually, for print, maybe we want to see the full heatmap? 
-           Let's set clip-path to none to show full overlay, or keep it interactive state?
-           Static print usually prefers full information. Let's show full heatmap overlay. */
-        clip-path: inset(0 0 0 0) !important; 
-        opacity: 0.7;
+        /* Respect inline style for clip-path */
+      }
+      .slider-line {
+        display: block !important;
+        background-color: rgb(56, 189, 248) !important; /* Ensure color prints */
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+      }
+      /* Hide the invisible input range in print, but keep the visual line */
+      .comparison-slider {
+        display: none !important; 
+      }
+
+      /* Footer at the bottom */
+      footer {
+        margin-top: auto !important; /* Push to bottom of flex container */
+        padding-top: 1rem !important;
+        padding-bottom: 0 !important;
+        border-top: 1px solid #334155;
+        flex-shrink: 0;
+      }
+      footer p {
+        font-size: 0.7rem !important;
       }
       .slider-line, .comparison-slider {
         display: none !important;
@@ -207,7 +264,7 @@
   </style>
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen">
-  <div class="max-w-7xl mx-auto py-10 px-4">
+  <div class="w-full md:max-w-7xl md:mx-auto py-10 px-4">
     <!-- Header -->
     <header class="mb-8">
       <h1 class="text-4xl font-bold tracking-tight text-sky-300">
