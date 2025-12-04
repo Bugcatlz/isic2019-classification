@@ -15,6 +15,7 @@ from fastapi.templating import Jinja2Templates
 from PIL import Image
 
 from models import build_model  # Hybrid model
+import config
 from .utils.preprocess import preprocess_image, preprocess_metadata
 from .explainer.layercam import generate_layercam
 from .explainer.attention import generate_attention_rollout
@@ -35,8 +36,44 @@ app.mount("/static", StaticFiles(directory=static_dir), name="static")
 # Class names (label order)
 CLASS_NAMES: List[str] = ["MEL", "NV", "BCC", "AK", "BKL", "DF", "VASC", "SCC"]
 
+# Disease information
+DISEASE_INFO = {
+    "MEL": {
+        "name": "Melanoma",
+        "description": "A serious form of skin cancer that develops in melanocytes. Early detection is crucial for successful treatment. Characterized by asymmetry, irregular borders, and color variation."
+    },
+    "NV": {
+        "name": "Melanocytic Nevus",
+        "description": "A benign mole or birthmark composed of melanocytes. Usually harmless but should be monitored for changes in size, shape, or color over time."
+    },
+    "BCC": {
+        "name": "Basal Cell Carcinoma",
+        "description": "The most common type of skin cancer, arising from basal cells. Grows slowly and rarely spreads, but can cause local damage if untreated. Often appears as a pearly or waxy bump."
+    },
+    "AK": {
+        "name": "Actinic Keratosis",
+        "description": "A precancerous skin lesion caused by sun damage. Appears as rough, scaly patches. Can potentially develop into squamous cell carcinoma if left untreated."
+    },
+    "BKL": {
+        "name": "Benign Keratosis",
+        "description": "A non-cancerous skin growth including seborrheic keratoses. Common in older adults, appearing as brown, black, or tan growths. Generally harmless and doesn't require treatment."
+    },
+    "DF": {
+        "name": "Dermatofibroma",
+        "description": "A benign fibrous nodule commonly found on the legs. Feels like a hard bump under the skin. Usually harmless and doesn't require treatment unless bothersome."
+    },
+    "VASC": {
+        "name": "Vascular Lesion",
+        "description": "Abnormalities of blood vessels in the skin, including hemangiomas and angiokeratomas. Most are benign and may appear as red or purple marks."
+    },
+    "SCC": {
+        "name": "Squamous Cell Carcinoma",
+        "description": "The second most common skin cancer, arising from squamous cells. Can spread if untreated. Often appears as a firm red nodule or flat lesion with a scaly surface."
+    }
+}
+
 # Load model
-MODEL_PATH = os.path.join(PARENT_DIR, "checkpoints", "best_model.pth")
+MODEL_PATH = os.path.join(PARENT_DIR, config.checkpoint_folder, "best_model.pth")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # meta_dim = 1(age) + 1(sex) + 8(anatom_site)
@@ -74,6 +111,8 @@ async def index(request: Request):
             "attention_img": None,
             "original_img": None,
             "shap_contribs": None,
+            "all_probs": None,
+            "disease_info": DISEASE_INFO,
             "age": None,
             "sex": None,
             "site": None,
@@ -124,6 +163,13 @@ async def predict(
         pred_idx = int(probs.argmax(dim=1).item())
         pred_prob = float(probs[0, pred_idx].item())
         pred_label = CLASS_NAMES[pred_idx]
+
+        # Get all probabilities for chart
+        all_probs_values = [float(probs[0, i].item() * 100) for i in range(len(CLASS_NAMES))]
+        all_probs = {
+            "labels": CLASS_NAMES,
+            "values": all_probs_values
+        }
 
         # Save resized original image (224x224 for display)
         results_dir = os.path.join(BASE_DIR, "static", "results")
@@ -178,6 +224,8 @@ async def predict(
             "attention_img": attn_url,
             "original_img": f"/static/results/{original_filename}" if 'original_filename' in locals() else None,
             "shap_contribs": shap_contribs,
+            "all_probs": all_probs if 'all_probs' in locals() else None,
+            "disease_info": DISEASE_INFO,
             "age": age,
             "sex": sex,
             "site": site,
