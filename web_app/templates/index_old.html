@@ -56,7 +56,6 @@
       aspect-ratio: 1;
       overflow: hidden;
       border-radius: 0.5rem;
-      background: #1e293b;
     }
     
     .comparison-img {
@@ -65,28 +64,15 @@
       left: 0;
       width: 100%;
       height: 100%;
-      object-fit: contain;
-      pointer-events: none;
+      object-fit: cover;
     }
     
     .comparison-overlay {
       position: absolute;
       top: 0;
       left: 0;
-      width: 100%;
       height: 100%;
       overflow: hidden;
-      clip-path: inset(0 50% 0 0);
-    }
-    
-    .comparison-overlay img {
-      position: absolute;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      object-fit: contain;
-      pointer-events: none;
     }
     
     .comparison-slider {
@@ -106,103 +92,6 @@
       background-color: rgb(56, 189, 248);
       pointer-events: none;
       z-index: 5;
-    }
-
-    /* Print Styles */
-    @media print {
-      @page {
-        margin: 0;
-        size: A4;
-      }
-      
-      html, body {
-        background-color: #020617 !important; /* slate-950 */
-        color: #f1f5f9 !important; /* slate-100 */
-        -webkit-print-color-adjust: exact !important;
-        print-color-adjust: exact !important;
-      }
-
-      /* Force background printing for all elements */
-      * {
-        -webkit-print-color-adjust: exact !important;
-        print-color-adjust: exact !important;
-      }
-
-      /* Add padding back since we removed page margin */
-      .max-w-7xl {
-        padding: 1cm !important;
-        max-width: 100% !important;
-        margin: 0 !important;
-      }
-
-      /* Hide elements not needed for report */
-      form, /* Input form */
-      .tab-button, /* Tab navigation */
-      .xai-container, /* Hide entire XAI container */
-      #downloadForm, /* Old download button */
-      #printBtnContainer, /* The print button itself */
-      .lg\:col-span-1 { /* The entire left column */
-        display: none !important;
-      }
-
-      .grid {
-        display: block !important;
-      }
-
-      .lg\:col-span-2 {
-        width: 100% !important;
-      }
-
-      /* Ensure charts fit */
-      canvas {
-        max-width: 100% !important;
-        page-break-inside: avoid;
-      }
-
-      /* Expand all XAI tabs */
-      .tab-content {
-        display: block !important;
-        opacity: 1 !important;
-        margin-bottom: 2rem;
-        break-inside: avoid; /* Prevent cutting inside a section */
-        page-break-inside: avoid;
-        border: 1px solid #334155; /* slate-700 */
-        border-radius: 0.5rem;
-        padding: 1rem;
-        background-color: #0f172a !important; /* slate-900 */
-      }
-
-      /* Add titles to tabs since buttons are gone */
-      .tab-content::before {
-        content: attr(data-print-title);
-        display: block;
-        font-size: 1.25rem;
-        font-weight: bold;
-        color: #7dd3fc; /* sky-300 */
-        margin-bottom: 1rem;
-        border-bottom: 1px solid #334155;
-        padding-bottom: 0.5rem;
-      }
-
-      /* Ensure charts and images fit */
-      canvas, img {
-        max-width: 100% !important;
-        page-break-inside: avoid;
-      }
-      
-      /* Reset slider for print (show full LIME/Comparison) */
-      .comparison-overlay {
-        clip-path: none !important;
-        width: 50% !important; /* Show half/half or full? Let's show side-by-side if possible, or just overlay. */
-        /* Actually, for print, maybe we want to see the full heatmap? 
-           Let's set clip-path to none to show full overlay, or keep it interactive state?
-           Static print usually prefers full information. Let's show full heatmap overlay. */
-        clip-path: inset(0 0 0 0) !important; 
-        opacity: 0.7;
-      }
-      .slider-line, .comparison-slider {
-        display: none !important;
-      }
     }
   </style>
 </head>
@@ -340,22 +229,23 @@
           </div>
           {% endif %}
           
-          <!-- Download/Print Buttons -->
-          <div class="flex gap-4 mt-4" id="printBtnContainer">
-            <button onclick="window.print()" 
-                    class="flex-1 inline-flex justify-center items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-sky-500 transition-all">
-              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M6.72 13.829c-.24.03-.48.062-.72.096m.72-.096a42.415 42.415 0 0110.56 0m-10.56 0L6.34 18m10.94-4.171c.24.03.48.062.72.096m-.72-.096L17.66 18m0 0l.229 2.523a1.125 1.125 0 01-1.12 1.227H7.231c-.662 0-1.18-.568-1.12-1.227L6.34 18m11.318 0h1.091A2.25 2.25 0 0021 15.75V9.456c0-1.081-.768-2.015-1.837-2.175a48.055 48.055 0 00-1.913-.247M6.34 18H5.25A2.25 2.25 0 013 15.75V9.456c0-1.081.768-2.015 1.837-2.175a48.041 48.041 0 011.913-.247m10.5 0a48.536 48.536 0 00-10.5 0m10.5 0V3.375c0-.621-.504-1.125-1.125-1.125h-8.25c-.621 0-1.125.504-1.125 1.125v3.659M18 10.5h.008v.008H18V10.5zm-3 0h.008v.008H15V10.5z" />
-              </svg>
-              Print / Save as PDF
+          <!-- Download Button -->
+          <form id="downloadForm" action="/download-report" method="post" class="mt-4">
+            <input type="hidden" name="original" value="{{ original_img }}">
+            <input type="hidden" name="layercam" value="{{ layercam_img }}">
+            <input type="hidden" name="attention" value="{{ attention_img }}">
+            <input type="hidden" name="prediction" value="{{ prediction }}">
+            <input type="hidden" name="probability" value="{{ probability }}">
+            <input type="hidden" name="age" value="{{ age }}">
+            <input type="hidden" name="sex" value="{{ sex }}">
+            <input type="hidden" name="site" value="{{ site }}">
+            <input type="hidden" name="all_probs" value='{{ all_probs | tojson if all_probs else "{}" }}'>
+            <input type="hidden" name="shap_contribs" value='{{ shap_contribs | tojson if shap_contribs else "[]" }}'>
+            <button type="submit"
+                    class="w-full inline-flex justify-center items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-emerald-500 transition-all">
+              Download PDF Report
             </button>
-          </div>
-          
-          <!-- Old Download Button (Hidden or kept as backup) -->
-          <!-- 
-          <form id="downloadForm" ... >
-          </form> 
-          -->
+          </form>
         </div>
 
         <!-- All Class Probabilities -->
@@ -365,19 +255,19 @@
         </div>
 
         <!-- Explainability Tabs -->
-        <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-6 shadow-xl fade-in xai-container">
+        <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-6 shadow-xl fade-in">
           <h2 class="text-xl font-semibold text-sky-200 mb-4">Model Explainability</h2>
           
           <!-- Tab Buttons -->
           <div class="flex gap-2 mb-6 flex-wrap">
-            <button onclick="switchTab('lime')" class="tab-button active px-4 py-2 rounded-lg bg-slate-800 text-sm font-medium">
-              LIME (End-to-End)
+            <button onclick="switchTab('comparison')" class="tab-button active px-4 py-2 rounded-lg bg-slate-800 text-sm font-medium">
+              Image Comparison
             </button>
             <button onclick="switchTab('layercam')" class="tab-button px-4 py-2 rounded-lg bg-slate-800 text-sm font-medium">
-              CNN Layer-CAM (Local)
+              CNN Layer-CAM
             </button>
             <button onclick="switchTab('attention')" class="tab-button px-4 py-2 rounded-lg bg-slate-800 text-sm font-medium">
-              Transformer Attention (Global)
+              Transformer Attention
             </button>
             <button onclick="switchTab('shap')" class="tab-button px-4 py-2 rounded-lg bg-slate-800 text-sm font-medium">
               Metadata SHAP
@@ -385,29 +275,26 @@
           </div>
 
           <!-- Tab Contents -->
-          <!-- Tab 1: LIME (End-to-End) -->
-          <div id="tab-lime" class="tab-content active" data-print-title="LIME Explanation">
-            <h3 class="text-sm font-semibold text-sky-200 mb-3">LIME - End-to-End Explanation</h3>
-            <p class="text-xs text-slate-400 mb-4">Model-agnostic explanation showing which regions are most important for the prediction. Drag the slider to compare.</p>
-            {% if original_img and lime_img %}
-            <div class="comparison-container border border-slate-700">
+          <div id="tab-comparison" class="tab-content active">
+            <h3 class="text-sm font-semibold text-sky-200 mb-3">Interactive Image Comparison</h3>
+            <p class="text-xs text-slate-400 mb-4">Drag the slider to compare the original image with Layer-CAM heatmap</p>
+            {% if original_img and layercam_img %}
+            <div class="comparison-container bg-slate-800 border border-slate-700">
               <img src="{{ original_img }}" class="comparison-img" alt="Original">
-              <div class="comparison-overlay" id="comparisonOverlay">
-                <img src="{{ lime_img }}" alt="LIME Heatmap">
+              <div class="comparison-overlay" id="comparisonOverlay" style="width: 50%;">
+                <img src="{{ layercam_img }}" class="comparison-img" alt="Layer-CAM">
               </div>
               <div class="slider-line" id="sliderLine" style="left: 50%;"></div>
               <input type="range" min="0" max="100" value="50" id="comparisonSlider" class="comparison-slider">
             </div>
-            <p class="text-xs text-slate-500 text-center mt-3">Drag slider to compare original image with LIME heatmap overlay</p>
             {% else %}
-            <p class="text-sm text-slate-500">Upload an image to see LIME explanation.</p>
+            <p class="text-sm text-slate-500">Upload an image to see comparison.</p>
             {% endif %}
           </div>
 
-          <!-- Tab 2: CNN Layer-CAM (Local) -->
-          <div id="tab-layercam" class="tab-content" data-print-title="CNN Layer-CAM">
-            <h3 class="text-sm font-semibold text-sky-200 mb-3">CNN Layer-CAM - Local Features</h3>
-            <p class="text-xs text-slate-400 mb-4">Shows which regions the convolutional neural network focuses on for local feature extraction</p>
+          <div id="tab-layercam" class="tab-content">
+            <h3 class="text-sm font-semibold text-sky-200 mb-3">CNN Layer-CAM Heatmap</h3>
+            <p class="text-xs text-slate-400 mb-4">Shows which regions the convolutional layers focus on</p>
             {% if layercam_img %}
             <div class="grid grid-cols-2 gap-4">
               <div>
@@ -415,7 +302,7 @@
                 <img src="{{ original_img }}" class="rounded-lg border border-slate-700 w-full" alt="Original">
               </div>
               <div>
-                <p class="text-xs text-slate-500 mb-2">Layer-CAM Heatmap</p>
+                <p class="text-xs text-slate-500 mb-2">Layer-CAM</p>
                 <img src="{{ layercam_img }}" class="rounded-lg border border-slate-700 w-full" alt="Layer-CAM">
               </div>
             </div>
@@ -424,10 +311,9 @@
             {% endif %}
           </div>
 
-          <!-- Tab 3: Transformer Attention (Global) -->
-          <div id="tab-attention" class="tab-content" data-print-title="Transformer Attention">
-            <h3 class="text-sm font-semibold text-sky-200 mb-3">Transformer Attention - Global Context</h3>
-            <p class="text-xs text-slate-400 mb-4">Shows global attention patterns from the vision transformer, capturing long-range dependencies</p>
+          <div id="tab-attention" class="tab-content">
+            <h3 class="text-sm font-semibold text-sky-200 mb-3">Transformer Attention Rollout</h3>
+            <p class="text-xs text-slate-400 mb-4">Shows global attention patterns from the vision transformer</p>
             {% if attention_img %}
             <div class="grid grid-cols-2 gap-4">
               <div>
@@ -435,7 +321,7 @@
                 <img src="{{ original_img }}" class="rounded-lg border border-slate-700 w-full" alt="Original">
               </div>
               <div>
-                <p class="text-xs text-slate-500 mb-2">Attention Rollout</p>
+                <p class="text-xs text-slate-500 mb-2">Attention</p>
                 <img src="{{ attention_img }}" class="rounded-lg border border-slate-700 w-full" alt="Attention">
               </div>
             </div>
@@ -444,8 +330,7 @@
             {% endif %}
           </div>
 
-          <!-- Tab 4: Metadata SHAP -->
-          <div id="tab-shap" class="tab-content" data-print-title="Metadata SHAP">
+          <div id="tab-shap" class="tab-content">
             <h3 class="text-sm font-semibold text-sky-200 mb-3">Metadata Feature Contributions (SHAP)</h3>
             <p class="text-xs text-slate-400 mb-4">Shows how patient metadata influences the prediction</p>
             {% if shap_contribs %}
@@ -522,17 +407,7 @@
       
       // Show selected tab
       document.getElementById('tab-' + tabName).classList.add('active');
-      // Fix: event is not defined if called from button onclick without passing event
-      // But here it relies on global event object which is deprecated but works in most browsers
-      // Better to use the button passed or find it.
-      // The original code used event.target.classList.add('active');
-      // I will keep it but also trigger resize for slider
-      if (window.event) {
-        window.event.currentTarget.classList.add('active');
-      }
-      
-      // Trigger resize to fix slider width if it was hidden
-      window.dispatchEvent(new Event('resize'));
+      event.target.classList.add('active');
     }
 
     // Image comparison slider
@@ -543,7 +418,7 @@
     if (slider && overlay && sliderLine) {
       slider.addEventListener('input', function() {
         const value = this.value;
-        overlay.style.clipPath = `inset(0 ${100 - value}% 0 0)`;
+        overlay.style.width = value + '%';
         sliderLine.style.left = value + '%';
       });
     }

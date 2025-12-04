@@ -16,6 +16,8 @@ opencv-python>=4.8.0
 
 # Explainability
 shap>=0.42.0
+lime>=0.2.0.1
+scikit-image>=0.21.0
 
 # Visualization
 matplotlib>=3.7.0
