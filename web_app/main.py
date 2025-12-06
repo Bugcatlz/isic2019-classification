@@ -80,7 +80,7 @@ DISEASE_INFO = {
 }
 
 # Load model
-MODEL_PATH = os.path.join(PARENT_DIR, config.checkpoint_folder, "best_model.pth")
+MODEL_PATH = os.path.join(PARENT_DIR, "checkpoints", "best_model.pth")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # meta_dim = 1(age) + 1(sex) + 8(anatom_site)
@@ -343,10 +343,216 @@ async def predict(
             site=site
         ).unsqueeze(0).to(device)
 
-        # Forward pass
+        # Attempt to capture attention maps from the ViT backbone using forward hooks.
+        attn_maps = []
+        hook_handles = []
+        attn_qkv_outputs = []
+
+        # Debug: report whether model has a ViT backbone
+        try:
+            has_vit = hasattr(model, 'vit') and getattr(model, 'vit') is not None
+        except Exception:
+            pass
+
+        # If ViT exists, print a short list of modules that look relevant (qkv/attn/proj)
+        try:
+            if has_vit:
+                candidates = []
+                for name, m in getattr(model, 'vit').named_modules():
+                    cls_name = m.__class__.__name__.lower()
+                    lname = name.lower()
+                    if ('qkv' in lname) or ('attn' in lname) or ('attention' in lname) or ('proj' in lname) or ('norm' in lname):
+                        candidates.append((name, m.__class__.__name__))
+                    # limit how many we print
+                    if len(candidates) >= 40:
+                        break
+                pass
+        except Exception as e:
+            print('Error enumerating vit submodules:', e)
+
+        def _extract_attn_tensors(x):
+            """Recursively find tensors that look like attention maps: shape (B, heads, N, N) or (heads, N, N) or (B, N, N)"""
+            found = []
+            import torch as _torch
+            if isinstance(x, _torch.Tensor):
+                if x.dim() == 4 and x.shape[-2] == x.shape[-1]:
+                    # (B, heads, N, N)
+                    found.append(x)
+                elif x.dim() == 3 and x.shape[-2] == x.shape[-1]:
+                    # (heads, N, N) or (B, N, N) — convert to (1, heads, N, N) later
+                    found.append(x)
+            elif isinstance(x, (list, tuple)):
+                for v in x:
+                    found.extend(_extract_attn_tensors(v))
+            elif isinstance(x, dict):
+                for v in x.values():
+                    found.extend(_extract_attn_tensors(v))
+            return found
+
+        def _hook(module, inp, out):
+            # inspect outputs and inputs for attention-like tensors
+            for candidate in _extract_attn_tensors(out):
+                try:
+                    attn_maps.append(candidate.detach().cpu())
+                except Exception:
+                    pass
+            for candidate in _extract_attn_tensors(inp):
+                try:
+                    # inp can be a tuple; ensure tensor
+                    attn_maps.append(candidate.detach().cpu())
+                except Exception:
+                    pass
+
+        def _qkv_hook(name):
+            def fn(module, inp, out):
+                try:
+                    # out is qkv projection tensor: (B, N, 3*E)
+                    attn_qkv_outputs.append((name, out.detach().cpu()))
+                except Exception:
+                    pass
+            return fn
+
+        # Register hooks on ViT attention-like submodules only (reduce false positives)
+        try:
+            for name, m in getattr(model, 'vit').named_modules():
+                if m is getattr(model, 'vit'):
+                    continue
+                cls_name = m.__class__.__name__.lower()
+                # common attention module identifiers in timm / pytorch implementations
+                # Hook attention modules for possible direct attention outputs
+                if ('attn' in cls_name) or ('attention' in cls_name) or ('multihead' in cls_name):
+                    try:
+                        h = m.register_forward_hook(_hook)
+                        hook_handles.append(h)
+                    except Exception:
+                        pass
+                # Additionally hook qkv linear layers specifically to reconstruct attention
+                if 'qkv' in name or name.endswith('.qkv') or name.endswith('.attn.qkv'):
+                    try:
+                        h = m.register_forward_hook(_qkv_hook(name))
+                        hook_handles.append(h)
+                    except Exception:
+                        pass
+        except Exception:
+            # If model has no vit attribute or modules can't be iterated, skip
+            hook_handles = []
+
         with torch.no_grad():
-            logits, attn1, attn2 = model(image_tensor, meta_tensor)
+            logits = None
+            try:
+                out = model(image_tensor, meta_tensor)
+                # model may return (logits, attn1, attn2) or just logits
+                if isinstance(out, (tuple, list)):
+                    logits = out[0]
+                    model_attn_outputs = list(out[1:])
+                else:
+                    logits = out
+                    model_attn_outputs = []
+            except Exception as e:
+                # fallback to previous call signature
+                logits, _, _ = model(image_tensor, meta_tensor)
+                logits = logits
+                model_attn_outputs = []
+
             probs = torch.softmax(logits, dim=1)
+
+        # remove hooks
+        for h in hook_handles:
+            try:
+                h.remove()
+            except Exception:
+                pass
+
+        # Debug: print captured attention shapes (server log)
+        # try:
+        #     shapes = [tuple(a.shape) for a in attn_maps]
+        #     if shapes:
+        #         print('Captured attn maps (from hooks):', shapes)
+        #     else:
+        #         print('No attn maps captured from hooks')
+        # except Exception:
+        #     pass
+
+        # If the model directly returned attention-like outputs, prefer those
+        attn_url = None
+        attn_candidates = []
+        if 'model_attn_outputs' in locals() and model_attn_outputs:
+            try:
+                model_shapes = [tuple(a.shape) for a in model_attn_outputs if hasattr(a, 'shape')]
+                # print('Model returned attention-like outputs shapes:', model_shapes)
+            except Exception:
+                pass
+            for a in model_attn_outputs:
+                try:
+                    import torch as _torch
+                    if isinstance(a, _torch.Tensor):
+                        attn_candidates.append(a.detach().cpu())
+                    elif isinstance(a, (list, tuple)):
+                        for v in a:
+                            if isinstance(v, _torch.Tensor):
+                                attn_candidates.append(v.detach().cpu())
+                except Exception:
+                    pass
+
+        # Fallback to captured hook attn_maps if model didn't return any
+        if not attn_candidates and attn_maps:
+            attn_candidates = attn_maps
+
+        # If we captured qkv outputs from Linear layers, reconstruct attention matrices
+        if attn_qkv_outputs:
+            try:
+                # print('Captured qkv outputs count:', len(attn_qkv_outputs))
+                # build a mapping of module name -> module object for vit
+                vit_modules = {n: m for n, m in getattr(model, 'vit').named_modules()} if hasattr(model, 'vit') else {}
+                for name, qkv in attn_qkv_outputs:
+                    try:
+                        # qkv: (B, N, 3*E)
+                        B, N, threeE = qkv.shape
+                        if threeE % 3 != 0:
+                            # print(f'Unexpected qkv last-dim not divisible by 3: {threeE} for {name}')
+                            continue
+                        E = threeE // 3
+                        # try to find parent attn module to get num_heads
+                        parent_name = name.rsplit('.', 1)[0]
+                        parent = vit_modules.get(parent_name, None)
+                        nheads = None
+                        if parent is not None:
+                            nheads = getattr(parent, 'num_heads', None) or getattr(parent, 'heads', None)
+                        # fallback: try to infer heads by checking common values
+                        if not nheads:
+                            # try typical small heads for tiny vit
+                            for h in (12, 8, 6, 4, 3, 2, 1):
+                                if E % h == 0:
+                                    nheads = h
+                                    break
+                        if not nheads:
+                            # print(f'Unable to infer num_heads for qkv {name} (E={E}), skipping')
+                            continue
+
+                        head_dim = E // nheads
+                        if head_dim * nheads != E:
+                            # print(f'Inconsistent head_dim computation for {name}: E={E}, nheads={nheads}')
+                            continue
+
+                        # reshape and split
+                        t = qkv.view(B, N, 3, nheads, head_dim)  # (B, N, 3, heads, head_dim)
+                        t = t.permute(2, 0, 3, 1, 4)  # (3, B, heads, N, head_dim)
+                        q, k, v = t[0], t[1], t[2]  # each (B, heads, N, head_dim)
+
+                        # compute attention: (B, heads, N, N)
+                        import math
+                        q = q.float()
+                        k = k.float()
+                        attn = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(head_dim)
+                        attn = torch.softmax(attn, dim=-1)
+
+                        # append to candidates
+                        attn_candidates.append(attn)
+                    except Exception as e:
+                        pass
+                        continue
+            except Exception as e:
+                pass
 
         pred_idx = int(probs.argmax(dim=1).item())
         pred_prob = float(probs[0, pred_idx].item())
@@ -387,15 +593,80 @@ async def predict(
             class_idx=pred_idx,
             device=device,
             base_dir=BASE_DIR,
-            layers=[model.cnn2]  # Use CNN features
+            layers=[model.convnext]  # Use ConvNeXt features (timm feature-extractor)
         )
 
         # Attention rollout (Transformer global features)
-        attn_url = generate_attention_rollout(
-            attn_layers=[attn1, attn2],
-            original_image=image_pil,
-            base_dir=BASE_DIR
-        )
+        # Use collected attn_candidates (preferred) or fallback to attn_maps
+        candidates = attn_candidates if attn_candidates else attn_maps
+        attn_url = None
+
+        def _is_perfect_square(n: int) -> bool:
+            if n <= 0: return False
+            import math
+            r = int(math.isqrt(n))
+            return r * r == n
+
+        if candidates:
+            valid_layers = []
+            
+            for a in candidates:
+                try:
+                    import torch as _torch
+                    if not isinstance(a, _torch.Tensor): continue
+
+                    # 1. 統一維度到 (B, heads, N, N)
+                    if a.dim() == 4:
+                        t = a
+                    elif a.dim() == 3:
+                        heads_or_B = a.shape[0]
+                        Ndim = a.shape[1]
+                        # 判斷是 (Heads, N, N) 還是 (Batch, N, N)
+                        if heads_or_B <= 32 and heads_or_B < Ndim: 
+                            t = a.unsqueeze(0) # (1, heads, N, N)
+                        else:
+                            t = a.unsqueeze(1) # (B, 1, N, N)
+                    elif a.dim() == 2:
+                        t = a.unsqueeze(0).unsqueeze(0)
+                    else:
+                        continue
+
+                    # 2. 檢查是否為方陣 (Attention Matrix 必須是方陣)
+                    B, heads, N1, N2 = t.shape
+                    if N1 != N2: continue
+                    
+                    # 3. 關鍵修改：不要切除 CLS Token，但要確認它的存在
+                    # 我們只檢查形狀是否合理，保留完整矩陣給 Rollout 算
+                    N = N1
+                    is_pure_patches = _is_perfect_square(N)
+                    has_cls_token = _is_perfect_square(N - 1)
+                    
+                    # 如果既不是完整方圖(如14x14=196)，也不是帶CLS的圖(197)，那就可能是 ConvNeXt 的特徵圖混進來了，跳過
+                    if not (is_pure_patches or has_cls_token):
+                        continue
+                        
+                    # 確保放到 CPU 以免累積 GPU 顯存
+                    valid_layers.append(t.detach().cpu())
+
+                except Exception:
+                    continue
+
+            # 4. 關鍵修改：不要只取前 6 層，Rollout 需要全層運算才準確
+            # 如果真的記憶體不足要過濾，建議取 "最後" 幾層，而不是最前幾層
+            # uniq = valid_layers[-6:] # 如果非要限制的話
+            uniq = valid_layers 
+
+            if uniq:
+                try:
+                    # 呼叫之前給你的、修正過 CLS 處理邏輯的 generate_attention_rollout
+                    attn_url = generate_attention_rollout(
+                        attn_layers=uniq,
+                        original_image=image_pil,
+                        base_dir=BASE_DIR
+                    )
+                except Exception as e:
+                    print(f"Rollout generation failed: {e}")
+                    attn_url = None
 
         # SHAP metadata
         shap_contribs = generate_shap_metadata(

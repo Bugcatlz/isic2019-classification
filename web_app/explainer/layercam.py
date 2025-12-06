@@ -15,23 +15,46 @@ def generate_layercam(model, img_tensor, meta_tensor, original_image, class_idx,
     activations = {}
     gradients = {}
 
-    # ---- hooks: forward + backward ----
+    # hooks: forward + backward
     def forward_hook(layer_name):
         def _hook(module, inp, out):
-            activations[layer_name] = out.detach()
+            # handle modules that return lists/tuples (e.g. timm feature extractors)
+            if isinstance(out, (list, tuple)):
+                target_out = out[-1]
+            elif isinstance(out, dict):
+                # pick last value
+                target_out = list(out.values())[-1]
+            else:
+                target_out = out
+
+            # store detached activation for later use
+            try:
+                activations[layer_name] = target_out.detach()
+            except Exception:
+                # fallback if not a tensor
+                activations[layer_name] = target_out
+
+            # register a hook on the tensor itself to capture gradients
+            try:
+                # only tensors have register_hook
+                if hasattr(target_out, 'register_hook'):
+                    def _capture_grad(grad, name=layer_name):
+                        gradients[name] = grad.detach()
+                    target_out.register_hook(_capture_grad)
+            except Exception:
+                pass
+
         return _hook
 
-    def backward_hook(layer_name):
-        def _hook(module, grad_in, grad_out):
-            gradients[layer_name] = grad_out[0].detach()
-        return _hook
-
-    # register hooks
+    # register forward hooks only (we capture grads via tensor hooks)
     hook_handles = []
     for i, layer in enumerate(layers):
         name = f"layer_{i}"
-        hook_handles.append(layer.register_forward_hook(forward_hook(name)))
-        hook_handles.append(layer.register_full_backward_hook(backward_hook(name)))
+        try:
+            h = layer.register_forward_hook(forward_hook(name))
+            hook_handles.append(h)
+        except Exception:
+            pass
 
     # forward + backward
     img_tensor.requires_grad_(True)
@@ -47,8 +70,23 @@ def generate_layercam(model, img_tensor, meta_tensor, original_image, class_idx,
     cam_total = None
 
     for key in activations.keys():
-        A = activations[key][0]       # (C, H, W)
-        G = gradients[key][0]         # (C, H, W)
+        A_full = activations[key]
+        G_full = gradients.get(key, None)
+
+        if G_full is None:
+            # no gradient captured for this layer — skip
+            continue
+
+        # select batch index 0
+        if A_full.dim() == 4:
+            A = A_full[0]
+        else:
+            A = A_full
+
+        if G_full.dim() == 4:
+            G = G_full[0]
+        else:
+            G = G_full
 
         pos_grad = torch.relu(G)
         cam = torch.relu(A * pos_grad).sum(dim=0)  # (H, W)

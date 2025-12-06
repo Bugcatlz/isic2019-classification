@@ -1,109 +1,132 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import timm
 
-# CNN block
-class CNNBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(CNNBlock, self).__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.bn   = nn.BatchNorm2d(out_channels)
-        self.relu = nn.ReLU(inplace=True)
 
-    def forward(self, x):
-        return self.relu(self.bn(self.conv(x)))
-
-# Transformer block (returns attention weights)
-class TransformerBlock(nn.Module):
-    def __init__(self, dim, heads=4, mlp_ratio=4.0):
-        super().__init__()
-        self.attn = nn.MultiheadAttention(embed_dim=dim, num_heads=heads, batch_first=True)
-        self.norm1 = nn.LayerNorm(dim)
-        self.norm2 = nn.LayerNorm(dim)
-
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, int(dim * mlp_ratio)),
-            nn.ReLU(inplace=True),
-            nn.Linear(int(dim * mlp_ratio), dim),
-        )
-
-    def forward(self, x):  # x: (B, N, C)
-        attn_out, attn_weights = self.attn(x, x, x, need_weights=True)
-        x = self.norm1(x + attn_out)
-
-        x = self.norm2(x + self.mlp(x))
-
-        return x, attn_weights
-
-# Metadata encoder
+# ============================================================
+# Metadata Encoder
+# ============================================================
 class MetadataEncoder(nn.Module):
     def __init__(self, in_dim, embed_dim=64):
         super().__init__()
         self.encoder = nn.Sequential(
             nn.Linear(in_dim, 64),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Linear(64, embed_dim),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
         )
 
     def forward(self, meta):
-        return self.encoder(meta)
+        return self.encoder(meta)  # [B, 64]
 
-# Hybrid model: CNN + Transformer + metadata fusion
-class SkinCancerHybrid(nn.Module):
-    def __init__(self, num_classes=8, meta_dim=10):
+
+# ============================================================
+# Hybrid Model: ConvNeXt-Tiny + ViT-Tiny + Metadata
+# ============================================================
+class SkinCancerConvNeXtViT(nn.Module):
+    def __init__(self, num_classes=8, meta_dim=10, pretrained=True):
         super().__init__()
 
-        # CNN feature extractor
-        self.cnn1 = CNNBlock(3, 32)
-        self.cnn2 = CNNBlock(32, 64)
-        self.pool = nn.MaxPool2d(2, 2)
-        # Patch embedding: stride 4 reduces 56×56 → 14×14 (tokens=196)
-        self.patch_embed = nn.Conv2d(
-            in_channels=64,
-            out_channels=128,
-            kernel_size=4,
-            stride=4
+        # ====================================================
+        # ConvNeXt Backbone
+        # ====================================================
+        self.convnext = timm.create_model(
+            "convnext_tiny",
+            pretrained=pretrained,
+            features_only=True
         )
-        # Transformer blocks
-        self.trans1 = TransformerBlock(dim=128)
-        self.trans2 = TransformerBlock(dim=128)
-        # Metadata encoder (1 age + 1 sex + 8 site = 10)
-        self.metadata_encoder = MetadataEncoder(in_dim=meta_dim, embed_dim=64)
-        # Classifier (fusion)
+        self.convnext_out_dim = self.convnext.feature_info[-1]["num_chs"]  # usually 768
+
+        # ====================================================
+        # ViT Backbone
+        # ====================================================
+        self.vit = timm.create_model(
+            "vit_tiny_patch16_224",
+            pretrained=pretrained
+        )
+
+        # Dynamically detect CLS token dimension
+        with torch.no_grad():
+            dummy = torch.zeros(1, 3, 224, 224)
+            feats = self.vit.forward_features(dummy)
+
+            if isinstance(feats, dict):
+                if "cls_token" in feats:
+                    vit_dim = feats["cls_token"].shape[-1]
+                elif "x" in feats:
+                    vit_dim = feats["x"].shape[-1]
+                else:
+                    vit_dim = next(iter(feats.values())).shape[-1]
+            else:
+                vit_dim = feats.shape[-1]
+
+        self.vit_dim = vit_dim
+
+        # ====================================================
+        # Metadata Encoder
+        # ====================================================
+        self.meta_encoder = MetadataEncoder(meta_dim, embed_dim=64)
+        self.meta_dim = 64
+
+        # ====================================================
+        # Classifier Head
+        # (concatenate raw convnext + vit + metadata features)
+        # ====================================================
+        fusion_dim = self.convnext_out_dim + self.vit_dim + self.meta_dim
+
         self.classifier = nn.Sequential(
-            nn.Linear(128 + 64, 128),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(128, num_classes),
+            nn.Linear(fusion_dim, 512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(512, num_classes)
         )
 
+    # ============================================================
+    # Extract ViT CLS token
+    # ============================================================
+    def _forward_vit_cls(self, img):
+        feats = self.vit.forward_features(img)
+
+        if isinstance(feats, dict):
+            if "cls_token" in feats:
+                return feats["cls_token"][:, 0]
+            elif "x" in feats:
+                return feats["x"][:, 0]
+            else:
+                return next(iter(feats.values()))[:, 0]
+        else:
+            return feats[:, 0]
+
+    # ============================================================
+    # Forward Pass
+    # ============================================================
     def forward(self, img, meta):
-        # CNN features
-        x = self.cnn1(img)
-        x = self.pool(x)
 
-        x = self.cnn2(x)
-        x = self.pool(x)
-        # Patch embedding
-        x = self.patch_embed(x)  # (B, 128, 14, 14)
+        # ConvNeXt features (GAP)
+        conv_feat = self.convnext(img)[-1]
+        conv_feat = conv_feat.mean(dim=[2, 3])  # [B, conv_dim]
 
-        B, C, H, W = x.shape
-        x = x.flatten(2).transpose(1, 2)  # (B, 196, 128)
-        # Transformer (global features)
-        x, attn1 = self.trans1(x)
-        x, attn2 = self.trans2(x)
+        # ViT features (CLS)
+        vit_feat = self._forward_vit_cls(img)    # [B, vit_dim]
 
-        img_feature = x.mean(dim=1)  # (B, 128)
-        # Metadata branch
-        meta_feature = self.metadata_encoder(meta)  # (B, 64)
+        # Metadata features
+        meta_feat = self.meta_encoder(meta)      # [B, 64]
+
         # Fusion
-        fused = torch.cat([img_feature, meta_feature], dim=1)
-        # Prediction
-        out = self.classifier(fused)
-        # Return attention maps
-        return out, attn1, attn2
+        fused = torch.cat([conv_feat, vit_feat, meta_feat], dim=1)
 
-# Factory
-def build_model(num_classes, meta_dim=10):
-    return SkinCancerHybrid(num_classes=num_classes, meta_dim=meta_dim)
+        # Classifier
+        out = self.classifier(fused)
+
+        return out, None, None
+
+
+# ============================================================
+# Factory Function
+# ============================================================
+def build_model(num_classes=8, meta_dim=10, pretrained=True):
+    return SkinCancerConvNeXtViT(
+        num_classes=num_classes,
+        meta_dim=meta_dim,
+        pretrained=pretrained
+    )
