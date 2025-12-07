@@ -1,132 +1,138 @@
 import torch
 import torch.nn as nn
-import timm
+from torchvision import models
 
 
-# ============================================================
-# Metadata Encoder
-# ============================================================
-class MetadataEncoder(nn.Module):
-    def __init__(self, in_dim, embed_dim=64):
+class Permute(nn.Module):
+    def __init__(self, *dims):
         super().__init__()
-        self.encoder = nn.Sequential(
-            nn.Linear(in_dim, 64),
-            nn.ReLU(inplace=True),
-            nn.Linear(64, embed_dim),
-            nn.ReLU(inplace=True),
-        )
-
-    def forward(self, meta):
-        return self.encoder(meta)  # [B, 64]
-
-
-# ============================================================
-# Hybrid Model: ConvNeXt-Tiny + ViT-Tiny + Metadata
-# ============================================================
-class SkinCancerConvNeXtViT(nn.Module):
-    def __init__(self, num_classes=8, meta_dim=10, pretrained=True):
+        self.dims = dims
+    def forward(self, x):
+        return x.permute(*self.dims)
+    
+class MetaEmbedding(nn.Module):
+    def __init__(self, meta, cls_dim=768 , gatted = True):
         super().__init__()
+        emb_dims = cls_dim//4
+        emb_list = [nn.Embedding(num, emb_dims, padding_idx=0) for num in meta]
+        self.embeddings = nn.ModuleList(emb_list)
 
-        # ====================================================
-        # ConvNeXt Backbone
-        # ====================================================
-        self.convnext = timm.create_model(
-            "convnext_tiny",
-            pretrained=pretrained,
-            features_only=True
-        )
-        self.convnext_out_dim = self.convnext.feature_info[-1]["num_chs"]  # usually 768
+        total_dim = cls_dim + emb_dims*3
 
-        # ====================================================
-        # ViT Backbone
-        # ====================================================
-        self.vit = timm.create_model(
-            "vit_tiny_patch16_224",
-            pretrained=pretrained
+        self.mlp = nn.Sequential(
+            nn.Linear(total_dim, cls_dim),
+            nn.GELU(),
+            nn.Linear(cls_dim, cls_dim),
         )
 
-        # Dynamically detect CLS token dimension
-        with torch.no_grad():
-            dummy = torch.zeros(1, 3, 224, 224)
-            feats = self.vit.forward_features(dummy)
-
-            if isinstance(feats, dict):
-                if "cls_token" in feats:
-                    vit_dim = feats["cls_token"].shape[-1]
-                elif "x" in feats:
-                    vit_dim = feats["x"].shape[-1]
-                else:
-                    vit_dim = next(iter(feats.values())).shape[-1]
-            else:
-                vit_dim = feats.shape[-1]
-
-        self.vit_dim = vit_dim
-
-        # ====================================================
-        # Metadata Encoder
-        # ====================================================
-        self.meta_encoder = MetadataEncoder(meta_dim, embed_dim=64)
-        self.meta_dim = 64
-
-        # ====================================================
-        # Classifier Head
-        # (concatenate raw convnext + vit + metadata features)
-        # ====================================================
-        fusion_dim = self.convnext_out_dim + self.vit_dim + self.meta_dim
-
-        self.classifier = nn.Sequential(
-            nn.Linear(fusion_dim, 512),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.5),
-            nn.Linear(512, num_classes)
+        self.gate = nn.Sequential(
+            nn.Linear(total_dim, cls_dim),
+            nn.Sigmoid()
         )
 
-    # ============================================================
-    # Extract ViT CLS token
-    # ============================================================
-    def _forward_vit_cls(self, img):
-        feats = self.vit.forward_features(img)
+        self.gatted = gatted
 
-        if isinstance(feats, dict):
-            if "cls_token" in feats:
-                return feats["cls_token"][:, 0]
-            elif "x" in feats:
-                return feats["x"][:, 0]
-            else:
-                return next(iter(feats.values()))[:, 0]
-        else:
-            return feats[:, 0]
+    def forward(self, cls_token, meta_ids):
+        if isinstance(meta_ids, torch.Tensor):
+            meta_ids = [meta_ids[:, i] for i in range(meta_ids.shape[1])]
 
-    # ============================================================
-    # Forward Pass
-    # ============================================================
-    def forward(self, img, meta):
+        meta_vecs = [emb(ids) for emb, ids in zip(self.embeddings, meta_ids)]
 
-        # ConvNeXt features (GAP)
-        conv_feat = self.convnext(img)[-1]
-        conv_feat = conv_feat.mean(dim=[2, 3])  # [B, conv_dim]
+        x = torch.cat([cls_token] + meta_vecs, dim=-1)
+        meta = self.mlp(x)
 
-        # ViT features (CLS)
-        vit_feat = self._forward_vit_cls(img)    # [B, vit_dim]
+        if(self.gatted):
+            meta = meta*self.gate(x)
+        
+        return meta
 
-        # Metadata features
-        meta_feat = self.meta_encoder(meta)      # [B, 64]
+class Covxvit(nn.Module):
+    def __init__(self, cnn, vit, meta):
+        super().__init__()
+        self.cnn = cnn
+        self.vit = vit
+        self.embadding = None
+        if len(meta) > 0:
+            self.embadding = MetaEmbedding(meta=meta, cls_dim=vit.class_token.shape[2])
+        in_channels = cnn[6][1].out_channels
+        self.proj = nn.Sequential(
+            nn.GroupNorm(1, in_channels),
+            nn.Conv2d(in_channels, vit.class_token.shape[2], kernel_size=1),
+        )
 
-        # Fusion
-        fused = torch.cat([conv_feat, vit_feat, meta_feat], dim=1)
+    def forward(self, x, meta=None):
+        x = self.cnn(x)
+        x = self.proj(x)
+        n, c, h, w = x.shape
+        x = x.reshape(n, c, h*w)
+        x = x.permute(0, 2, 1)
+        n = x.shape[0]
 
-        # Classifier
-        out = self.classifier(fused)
+        batch_class_token = self.vit.class_token.expand(n, -1, -1)
 
-        return out, None, None
+        if(not self.embadding is None):
+            emb = self.embadding(batch_class_token[:,0,:], meta).unsqueeze(1)
+            batch_class_token = batch_class_token + emb
 
+        x = torch.cat([batch_class_token, x], dim=1)
 
-# ============================================================
-# Factory Function
-# ============================================================
-def build_model(num_classes=8, meta_dim=10, pretrained=True):
-    return SkinCancerConvNeXtViT(
-        num_classes=num_classes,
-        meta_dim=meta_dim,
-        pretrained=pretrained
-    )
+        x = self.vit.encoder(x)
+        x = x[:, 0]
+        x = self.vit.heads(x)
+
+        return x
+
+def build_model(num_classes, model = "convnext", meta = []):
+    if(model == "convnext"):
+        model = models.convnext_base(weights=models.ConvNeXt_Base_Weights.IMAGENET1K_V1)
+        model.classifier[2] = nn.Linear(model.classifier[2].in_features, num_classes)
+    elif(model == "vitb"):
+        model = models.vit_b_16(weights = models.ViT_B_16_Weights.IMAGENET1K_V1)
+        model.heads.head = nn.Linear(model.heads.head.in_features, num_classes)
+    elif(model == "vit"):
+        model = models.vit_l_16(weights = models.ViT_L_16_Weights.IMAGENET1K_V1)
+        model.heads.head = nn.Linear(model.heads.head.in_features, num_classes)
+    elif(model == "swinb"):
+        model = models.swin_b(weights = models.Swin_B_Weights.IMAGENET1K_V1)
+        model.head = nn.Linear(model.head.in_features, num_classes)
+    elif(model == "swin"):
+        model = models.swin_t(weights = models.Swin_T_Weights.IMAGENET1K_V1)
+        model.head = nn.Linear(model.head.in_features, num_classes)
+    else:
+        # vit = models.vit_b_16(weights = models.ViT_B_16_Weights.IMAGENET1K_V1)
+        vit = models.vit_l_32(weights = models.ViT_L_32_Weights.IMAGENET1K_V1)
+        vit.heads.head = nn.Linear(vit.heads.head.in_features, num_classes)
+        cnn = models.convnext_large(weights=models.ConvNeXt_Large_Weights.IMAGENET1K_V1)
+        model = Covxvit(cnn.features[:7], vit, meta)
+    return model
+
+if __name__ == "__main__":
+    # model = build_model(10, model="conxvit", meta = [])
+    
+    # vit = models.vit_h_14(weights = models.ViT_H_14_Weights.IMAGENET1K_SWAG_E2E_V1) #weights = models.ViT_B_16_Weights.IMAGENET1K_V1
+    vit = models.vit_b_16()
+    print(vit.class_token.shape)
+    print(vit.encoder(torch.zeros((2,197,768))).shape)
+    print(vit.conv_proj.out_channels)
+    # print(nn.Conv2d(vit.conv_proj.out_channels, vit.class_token.shape[2], kernel_size=(1,1)))
+    # vit = models.vit_b_32()  #768
+    # print(vit.class_token.shape)
+    # print(vit.encoder(torch.zeros((2,50,768))).shape)
+    # vit = models.vit_l_16()
+    # print(vit.class_token.shape)
+    # print(vit.encoder(torch.zeros((2,197,1024))).shape)
+    # vit = models.vit_l_32()  #1024
+    # print(vit.class_token.shape)
+    # print(vit.encoder(torch.zeros((2,50,1024))).shape)
+    model = models.convnext_tiny()
+    # print(model.features[:5](torch.zeros((1,3,224,224))).shape)
+    # in_channels = model.features[:5][4][1].out_channels
+    print(model.features[:5])
+    # print(nn.Sequential(nn.LayerNorm((in_channels,), eps=1e-06, elementwise_affine=True), nn.Conv2d(in_channels, vit.class_token.shape[2], kernel_size=(1,1))))
+    # model = models.convnext_small()
+    # print(model.features[:5](torch.zeros((1,3,224,224))).shape)
+    # model = models.convnext_base()
+    # print(model.features[:5](torch.zeros((1,3,224,224))).shape)
+    # model = models.convnext_large()
+    # print(model.features[:5](torch.zeros((1,3,224,224))).shape)
+

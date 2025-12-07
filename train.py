@@ -9,107 +9,104 @@ from dataloader import ISIC2019Dataset
 from transforms import train_transform, val_transform
 from models import build_model
 from losses import FocalLoss
-from utils import train_one_epoch, evaluate
+from utils import train_one_epoch, evaluate, print_result
 import config
 
-# Directories
+#Val  : Accuracy: 0.8859, Precision: 0.8612, Recall: 0.7790, F1: 0.8141, Loss: 0.4464 step 20 
+#Val  : Accuracy: 0.8745, Precision: 0.8597, Recall: 0.7670, F1: 0.8044, Loss: 0.4716 step 200
+#Val  : Accuracy: 0.8851, Precision: 0.8644, Recall: 0.7670, F1: 0.8066, Loss: 0.4261 ori
+# Create directories for splits and checkpoints if they do not exist
 os.makedirs("splits", exist_ok=True)
 os.makedirs("checkpoints", exist_ok=True)
 
-# Load label CSV (multi-class one-hot)
-print("[INFO] Loading label CSV:", config.csv_file)
+# Dataset split
 df = pd.read_csv(config.csv_file)
-
-# Create a single label column (string class name)
 df["label"] = df.iloc[:, 1:].idxmax(axis=1)
 
+train_df, temp_df = train_test_split(df, test_size=0.3, stratify=df["label"], random_state=42)
+val_df, test_df = train_test_split(temp_df, test_size=0.6666, stratify=temp_df["label"], random_state=42)
 
-# Load metadata CSV
-print("[INFO] Loading metadata CSV:", config.metadata_file)
-meta_df = pd.read_csv(config.metadata_file)
-
-# Merge metadata with labels on image column
-df = df.merge(meta_df, on="image", how="left")
-print(f"[INFO] Dataset after merge: {df.shape}")
-
-
-# Stratified split
-train_df, temp_df = train_test_split(
-    df, test_size=0.3, stratify=df["label"], random_state=42
-)
-
-val_df, test_df = train_test_split(
-    temp_df, test_size=0.3333, stratify=temp_df["label"], random_state=42
-)
-
-# Save split CSVs
 train_df.to_csv("splits/train_split.csv", index=False)
 val_df.to_csv("splits/val_split.csv", index=False)
 test_df.to_csv("splits/test_split.csv", index=False)
 
-print("[INFO] Splits saved → splits/train_split.csv, val_split.csv, test_split.csv")
+# Dataset and loaders
+train_dataset = ISIC2019Dataset(config.img_dir, "splits/train_split.csv",
+                                meta_file="data/ISIC_2019_Training_Metadata.csv",
+                                # aug_dir = config.augimg_dir,
+                                # augmeta = config.augmeta,
+                                transform=train_transform,train=True, undersampling=False)
+val_dataset   = ISIC2019Dataset(config.img_dir, "splits/val_split.csv",
+                                meta_file="data/ISIC_2019_Training_Metadata.csv",
+                                transform=val_transform, undersampling=False)
+test_dataset  = ISIC2019Dataset(config.img_dir, "splits/test_split.csv",
+                                meta_file="data/ISIC_2019_Training_Metadata.csv",
+                                transform=val_transform, undersampling=False)
 
-
-# Datasets and loaders
-train_dataset = ISIC2019Dataset(config.img_dir, "splits/train_split.csv", transform=train_transform)
-val_dataset   = ISIC2019Dataset(config.img_dir, "splits/val_split.csv", transform=val_transform)
-test_dataset  = ISIC2019Dataset(config.img_dir, "splits/test_split.csv", transform=val_transform)
-
-train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True,
-                          num_workers=4, pin_memory=True, persistent_workers=False)
-val_loader   = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False,
-                          num_workers=4, pin_memory=True, persistent_workers=False)
-test_loader  = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False,
-                           num_workers=4, pin_memory=True, persistent_workers=False)
-
-print("[INFO] DataLoaders ready")
-
+train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=2, pin_memory=True)
+val_loader   = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=2, pin_memory=True)
+test_loader  = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=2, pin_memory=True)
 
 # Model, loss, optimizer
 num_classes = len(train_dataset.label_cols)
-model = build_model(num_classes).to(config.device)
+model = build_model(num_classes, model="conxvit", meta = [] + train_dataset.n_features ).to(config.device)#
 
-criterion = FocalLoss(alpha=1, gamma=2)
-optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=1e-4)
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.num_epochs)
+criterion = FocalLoss(alpha=train_dataset.weights, gamma=2)
+# optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.wweight_decay)
+# optimizer = optim.SGD(model.parameters(), momentum=config.momentum, lr=config.wlearning_rate, weight_decay=config.wweight_decay)
 
-print("[INFO] Model initialized")
+# scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.num_epochs)
 
+# warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+#     optimizer, start_factor=config.wlearning_rate, end_factor=config.learning_rate, total_iters=config.warmup_epochs
+# )
 
-# Training loop
-best_acc = 0.0
+optimizer = torch.optim.SGD(
+    model.parameters(),lr=config.learning_rate, momentum=config.momentum,weight_decay=config.wweight_decay
+)
 
-for epoch in range(1, config.num_epochs + 1):
-    print(f"\n========== Epoch {epoch}/{config.num_epochs} ==========")
+warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+    optimizer,start_factor=1e-4, end_factor=1.0,total_iters=config.warmup_epochs
+)
 
-    train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, config.device)
-    val_loss, val_acc     = evaluate(model, val_loader, criterion, config.device, mode="[Val]")
+cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    optimizer,
+    T_max=config.num_epochs - config.warmup_epochs
+)
 
-    scheduler.step()
+if __name__ == "__main__":
+    # Training loop
+    best_acc = 0.0
+    for epoch in range(1, config.num_epochs + 1):
+        t_loss, train_metrics = train_one_epoch(model, train_loader, criterion, optimizer, config.device)
+        v_loss, val___metrics = evaluate(model, val_loader, criterion, config.device, mode="[Val]")
 
-    print(f"[Epoch {epoch}] Train Acc: {train_acc:.4f}, Loss: {train_loss:.4f}")
-    print(f"[Epoch {epoch}] Val   Acc: {val_acc:.4f}, Loss: {val_loss:.4f}")
+        if(epoch <= config.warmup_epochs):
+            warmup_scheduler.step()
+        else:
+            cosine_scheduler.step()
 
-    # Save best model
-    if val_acc > best_acc:
-        best_acc = val_acc
-        save_path = os.path.join("checkpoints", "best_model.pth")
-        torch.save(model.state_dict(), save_path)
-        print(f"[INFO] Best model saved → {save_path} (Acc: {best_acc:.4f})")
+        # t_acc = train_metrics["acc"]
+        v_acc = val___metrics["acc"]
+        # t_pre = train_metrics["precision"]
+        # v_pre = val___metrics["precision"]
+        # t_rec = train_metrics["recall"]
+        # v_rec = val___metrics["recall"]
+        # t_f1  = train_metrics["f1"]
+        # v_f1  = val___metrics["f1"]
 
+        print(f"Epoch [{epoch}] :")
+        print_result(train_metrics)
+        print_result(val___metrics)
 
-# Testing (best checkpoint)
-print("\n[INFO] Testing best model...")
-model.load_state_dict(torch.load("checkpoints/best_model.pth"))
+        if v_acc > best_acc:
+            best_acc = v_acc
+            save_path = os.path.join("checkpoints", "best_model.pth")
+            torch.save(model.state_dict(), save_path)
+            print(f"Best model saved at {save_path} (Acc: {best_acc:.4f})")
 
-test_loss, test_acc = evaluate(model, test_loader, criterion, config.device, mode="[Test]")
-
-print(f"\n========== TEST RESULT ==========")
-print(f"Test Accuracy: {test_acc:.4f}")
-print(f"Test Loss: {test_loss:.4f}")
-print("=================================")
-
-# Cleanup DataLoaders to prevent resource leaks
-del train_loader, val_loader, test_loader
-import gc
-gc.collect()
+    # Test loop
+    print("\nTesting best model...")
+    model.load_state_dict(torch.load(os.path.join("checkpoints", "best_model.pth")))
+    test_loss, test_metrics = evaluate(model, test_loader, criterion, config.device, mode="[Test]")
+    print_result(test_metrics)
