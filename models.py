@@ -82,6 +82,18 @@ class Covxvit(nn.Module):
 
         return x
 
+import copy
+class Covxv2(nn.Module):
+    def __init__(self, cnn, vit):
+        super().__init__()
+        self.cnn = cnn
+        self.vit = vit
+
+    def forward(self, x, meta=None):
+        x = self.vit.head(self.cnn(x))
+        return x
+
+import timm
 def build_model(num_classes, model = "convnext", meta = []):
     if(model == "convnext"):
         model = models.convnext_base(weights=models.ConvNeXt_Base_Weights.IMAGENET1K_V1)
@@ -98,6 +110,39 @@ def build_model(num_classes, model = "convnext", meta = []):
     elif(model == "swin"):
         model = models.swin_t(weights = models.Swin_T_Weights.IMAGENET1K_V1)
         model.head = nn.Linear(model.head.in_features, num_classes)
+    elif(model == "convnextv2"):
+        cnn = timm.create_model('convnextv2_base.fcmae_ft_in1k', pretrained=True)
+        cnn = torch.nn.Sequential(
+            cnn.stem,
+            cnn.stages[:5]
+        )
+        vit = timm.create_model('mobilevitv2_100', pretrained=True)
+        vit.head.fc = torch.nn.Linear(vit.head.fc.in_features, num_classes)
+        model = Covxv2(cnn,vit)
+
+        vit = timm.create_model('mobilevitv2_100', pretrained=True)
+        cnn = timm.create_model('convnextv2_base.fcmae_ft_in1k', pretrained=True)
+        cnn = torch.nn.Sequential(
+            cnn.stem,
+            cnn.stages[:5]
+        )
+
+        # 測試
+        dummy_input = torch.randn(1, 3, 224, 224)
+        modified = copy.deepcopy(vit.stages[3])
+        modified[1].transformer = torch.nn.Sequential(modified[1].transformer, modified[1].transformer)
+        cnn = torch.nn.Sequential(
+            cnn,
+            # model.stages[0],
+            torch.nn.Conv2d(1024,256, kernel_size=1),
+            modified,
+            vit.stages[4]
+        )
+        # model.stem = torch.nn.Identity()
+        # model.stages[](model.stem(dummy_input)).shape
+        vit.head.fc = torch.nn.Linear(vit.head.fc.in_features, num_classes)
+        model = Covxv2(cnn,vit)
+
     else:
         # vit = models.vit_b_16(weights = models.ViT_B_16_Weights.IMAGENET1K_V1)
         vit = models.vit_l_32(weights = models.ViT_L_32_Weights.IMAGENET1K_V1)
